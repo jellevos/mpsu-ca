@@ -9,4 +9,5 @@ edition = "2018"
 [dependencies]
 curve25519-dalek = "3"
 rand = "0.7"
-#cryptid = "0.2.8"
+fasthash = "0.4.0"
+bytevec = "0.2.0"

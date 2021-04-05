@@ -1,8 +1,44 @@
+#![feature(const_generics)]
+
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::scalar::Scalar;
 
 use rand::rngs::OsRng;
 use curve25519_dalek::ristretto::RistrettoPoint;
+
+use fasthash::xx;
+use bytevec::ByteEncodable;
+
+
+struct BloomFilter {
+    bins: Vec<bool>,
+    bin_count: u32,
+    seeds: Vec<u32>,
+}
+
+impl BloomFilter {
+
+    fn insert(&mut self, element: u64) {
+        let element_bytes = element.encode::<u64>().unwrap();
+
+        for seed in &self.seeds {
+            self.bins[(xx::hash32_with_seed(&element_bytes, *seed) % self.bin_count) as usize] = true;
+        }
+    }
+
+    fn contains(&self, element: u64) -> bool {
+        let element_bytes = element.encode::<u64>().unwrap();
+
+        for seed in &self.seeds {
+            if !self.bins[(xx::hash32_with_seed(&element_bytes, *seed) % self.bin_count) as usize] {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+}
 
 fn main() {
     println!("Hello, world!");
@@ -32,4 +68,11 @@ fn main() {
     let decryption = &ciphertext_2 - (&share_1 + &share_2 + &share_3);
 
     println!("{}", message == decryption);
+
+    let mut bloom_filter = BloomFilter { bins: vec![false; 10], bin_count: 10, seeds: vec![3, 5] };
+    bloom_filter.insert(4);
+
+    println!("{}", &bloom_filter.contains(6));
+    println!("{}", &bloom_filter.contains(3));
+    println!("{}", &bloom_filter.contains(4));
 }
