@@ -1,3 +1,5 @@
+#![feature(destructuring_assignment)]
+
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::scalar::Scalar;
 
@@ -7,8 +9,9 @@ use curve25519_dalek::ristretto::RistrettoPoint;
 use fasthash::xx;
 use bytevec::ByteEncodable;
 use std::ops::Add;
-use permutation_iterator::Permutor;
-use curve25519_dalek::traits::IsIdentity;
+use permutation_iterator::{Permutor};
+use curve25519_dalek::traits::{IsIdentity, Identity};
+use rand::RngCore;
 
 macro_rules! define_add_variants {
     (LHS = $lhs:ty, RHS = $rhs:ty, Output = $out:ty) => {
@@ -44,7 +47,7 @@ struct BloomFilter {
 
 impl BloomFilter {
 
-    fn insert(&mut self, element: u64) {
+    fn insert(&mut self, element: &u64) {
         let element_bytes = element.encode::<u64>().unwrap();
 
         for seed in &self.seeds {
@@ -52,7 +55,7 @@ impl BloomFilter {
         }
     }
 
-    fn contains(&self, element: u64) -> bool {
+    fn contains(&self, element: &u64) -> bool {
         let element_bytes = element.encode::<u64>().unwrap();
 
         for seed in &self.seeds {
@@ -66,6 +69,7 @@ impl BloomFilter {
 
 }
 
+#[derive(Copy, Clone)]
 struct Ciphertext {
     c1: RistrettoPoint,
     c2: RistrettoPoint,
@@ -118,112 +122,127 @@ impl PublicKey {
 
 }
 
+struct Party {
+    generator: RistrettoPoint,
+    rng: OsRng,
+    set: Vec<u64>,
+    partial_key: Option<Scalar>,
+    blinded_key: Option<RistrettoPoint>,
+    public_key: Option<PublicKey>,
+    bloom_filter: Option<BloomFilter>,
+    ciphertexts: Option<Vec<Ciphertext>>,
+}
+
+impl Party {
+    fn create(rng: OsRng, set: Vec<u64>) -> Self {
+        Party {
+            generator: RISTRETTO_BASEPOINT_POINT,
+            rng,
+            set,
+            partial_key: None,
+            blinded_key: None,
+            public_key: None,
+            bloom_filter: None,
+            ciphertexts: None,
+        }
+    }
+
+    fn generate_keys(&mut self) {
+        self.partial_key = Some(Scalar::random(&mut self.rng));
+        self.blinded_key = Some(&self.partial_key.unwrap() * &self.generator)
+    }
+
+    fn generate_public_key(&mut self, blinded_keys: Vec<RistrettoPoint>) {
+        self.public_key = Some(PublicKey::create(blinded_keys));
+    }
+
+    fn build_bloom_filter(&mut self, m_bins: usize, h_hashes: u32) {
+        let mut seeds: Vec<u32> = vec![];
+        for i in 0..h_hashes {
+            seeds.push(i);
+        }
+
+        self.bloom_filter = Some(BloomFilter {
+            bins: vec![false; m_bins],
+            bin_count: m_bins as u32,
+            seeds,
+        });
+
+        for element in &self.set {
+            self.bloom_filter.as_mut().unwrap().insert(element);
+        }
+    }
+
+    fn build_ciphertexts(&mut self) {
+        self.ciphertexts = Some(vec![]);
+        for bin in &self.bloom_filter.as_ref().unwrap().bins {
+            if *bin {
+                self.ciphertexts.as_mut().unwrap().push(Ciphertext {
+                    c1: RistrettoPoint::random(&mut self.rng),
+                    c2: RistrettoPoint::random(&mut self.rng) });
+            } else {
+                self.ciphertexts.as_mut().unwrap().push(self.public_key.as_ref().unwrap().encrypt_identity(&mut self.rng));
+            }
+        }
+    }
+
+    fn shuffle_decrypt(mut self, ciphertexts: &Vec<Ciphertext>, accumulators: &Vec<RistrettoPoint>)
+        -> (Vec<Ciphertext>, Vec<RistrettoPoint>) {
+        let permutation_key: u64 = self.rng.next_u64();
+        let permutor = Permutor::new_with_u64_key(self.bloom_filter.unwrap().bin_count as u64, permutation_key);
+
+        let mut shuffled_accumulators: Vec<RistrettoPoint> = vec![];
+        let mut shuffled_ciphertexts: Vec<Ciphertext> = vec![];
+        for permuted in permutor {
+            shuffled_accumulators.push(accumulators[permuted as usize]);
+            shuffled_ciphertexts.push(ciphertexts[permuted as usize]);
+        }
+
+        for i in 0..10 {
+            shuffled_accumulators[i] += shuffled_ciphertexts[i].c1 * &self.partial_key.unwrap();
+        }
+
+        (shuffled_ciphertexts, shuffled_accumulators)
+    }
+}
+
 fn main() {
     println!("Hello, world!");
     let mut rng = OsRng;
 
-    let generator = RISTRETTO_BASEPOINT_POINT;
+    let mut party_1 = Party::create(rng, vec![6, 3, 4]);
+    let mut party_2 = Party::create(rng, vec![2, 3, 4]);
+    let mut party_3 = Party::create(rng, vec![1, 3]);
 
-    let partial_key_1 = Scalar::random(&mut rng);
-    let blinded_key_1 = &partial_key_1 * &generator;
-    let partial_key_2 = Scalar::random(&mut rng);
-    let blinded_key_2 = &partial_key_2 * &generator;
-    let partial_key_3 = Scalar::random(&mut rng);
-    let blinded_key_3 = &partial_key_3 * &generator;
+    party_1.generate_keys();
+    party_2.generate_keys();
+    party_3.generate_keys();
 
-    let public_key = PublicKey::create(vec![blinded_key_1, blinded_key_2, blinded_key_3]);
+    party_1.generate_public_key(vec![party_1.blinded_key.unwrap(), party_2.blinded_key.unwrap(), party_3.blinded_key.unwrap()]);
+    party_2.generate_public_key(vec![party_1.blinded_key.unwrap(), party_2.blinded_key.unwrap(), party_3.blinded_key.unwrap()]);
+    party_3.generate_public_key(vec![party_1.blinded_key.unwrap(), party_2.blinded_key.unwrap(), party_3.blinded_key.unwrap()]);
 
-    let mut bloom_filter_1 = BloomFilter { bins: vec![false; 10], bin_count: 10, seeds: vec![3, 5] };
-    bloom_filter_1.insert(4);
+    party_1.build_bloom_filter(10, 2);
+    party_2.build_bloom_filter(10, 2);
+    party_3.build_bloom_filter(10, 2);
 
-    println!("{}", &bloom_filter_1.contains(6));
-    println!("{}", &bloom_filter_1.contains(3));
-    println!("{}", &bloom_filter_1.contains(4));
+    party_1.build_ciphertexts();
+    party_2.build_ciphertexts();
+    party_3.build_ciphertexts();
 
-    let mut bloom_filter_2 = BloomFilter { bins: vec![false; 10], bin_count: 10, seeds: vec![3, 5] };
-    bloom_filter_2.insert(2);
-    bloom_filter_2.insert(3);
-    bloom_filter_2.insert(4);
-
-    let mut bloom_filter_3 = BloomFilter { bins: vec![false; 10], bin_count: 10, seeds: vec![3, 5] };
-    bloom_filter_3.insert(1);
-    bloom_filter_3.insert(3);
-
-    let mut ciphertexts_1: Vec<Ciphertext> = vec![];
-    for bin in &bloom_filter_1.bins {
-        if *bin {
-            ciphertexts_1.push(Ciphertext {
-                c1: RistrettoPoint::random(&mut rng),
-                c2: RistrettoPoint::random(&mut rng) });
-        } else {
-            ciphertexts_1.push(public_key.encrypt_identity(&mut rng));
-        }
-    }
-    let mut ciphertexts_2: Vec<Ciphertext> = vec![];
-    for bin in &bloom_filter_2.bins {
-        if *bin {
-            ciphertexts_2.push(Ciphertext {
-                c1: RistrettoPoint::random(&mut rng),
-                c2: RistrettoPoint::random(&mut rng) });
-        } else {
-            ciphertexts_2.push(public_key.encrypt_identity(&mut rng));
-        }
-    }
-    let mut ciphertexts_3: Vec<Ciphertext> = vec![];
-    for bin in &bloom_filter_3.bins {
-        if *bin {
-            ciphertexts_3.push(Ciphertext {
-                c1: RistrettoPoint::random(&mut rng),
-                c2: RistrettoPoint::random(&mut rng) });
-        } else {
-            ciphertexts_3.push(public_key.encrypt_identity(&mut rng));
-        }
-    }
-
-    let mut aggregated_ciphertexts: Vec<Ciphertext> = vec![];
+    let mut ciphertexts: Vec<Ciphertext> = vec![];
     for i in 0..10 {
-        aggregated_ciphertexts.push(&ciphertexts_1[i] + &ciphertexts_2[i] + &ciphertexts_3[i]);
+        ciphertexts.push(&party_1.ciphertexts.as_ref().unwrap()[i] + &party_2.ciphertexts.as_ref().unwrap()[i] + &party_3.ciphertexts.as_ref().unwrap()[i]);
     }
+    let mut accumulators: Vec<RistrettoPoint> = vec![RistrettoPoint::identity(); 10];
 
-    let permutation_key_1: [u8; 32] = [0xBA; 32];
-    let permutor_1 = Permutor::new_with_slice_key(10, permutation_key_1);
-    let permutation_key_2: [u8; 32] = [0x12; 32];
-    let permutor_2 = Permutor::new_with_slice_key(10, permutation_key_2);
-    let permutation_key_3: [u8; 32] = [0x33; 32];
-    let permutor_3 = Permutor::new_with_slice_key(10, permutation_key_3);
-
-    let mut accumulators: Vec<RistrettoPoint> = vec![];
-
-    let mut shuffled_ciphertexts_1: Vec<&Ciphertext> = vec![];
-    for permuted in permutor_1 {
-        shuffled_ciphertexts_1.push(&aggregated_ciphertexts[permuted as usize]);
-    }
-    for ciphertext in &shuffled_ciphertexts_1 {
-        accumulators.push(ciphertext.c1 * &partial_key_1);
-    }
-
-    let mut shuffled_accumulators_2: Vec<RistrettoPoint> = vec![];
-    let mut shuffled_ciphertexts_2: Vec<&Ciphertext> = vec![];
-    for permuted in permutor_2 {
-        shuffled_accumulators_2.push(accumulators[permuted as usize]);
-        shuffled_ciphertexts_2.push(shuffled_ciphertexts_1[permuted as usize]);
-    }
-    for i in 0..10 {
-        shuffled_accumulators_2[i] += shuffled_ciphertexts_2[i].c1 * &partial_key_2;
-    }
-    let mut shuffled_accumulators_3: Vec<RistrettoPoint> = vec![];
-    let mut shuffled_ciphertexts_3: Vec<&Ciphertext> = vec![];
-    for permuted in permutor_3 {
-        shuffled_accumulators_3.push(shuffled_accumulators_2[permuted as usize]);
-        shuffled_ciphertexts_3.push(shuffled_ciphertexts_2[permuted as usize]);
-    }
-    for i in 0..10 {
-        shuffled_accumulators_3[i] += shuffled_ciphertexts_3[i].c1 * &partial_key_3;
-    }
+    (ciphertexts, accumulators) = party_1.shuffle_decrypt(&ciphertexts, &accumulators);
+    (ciphertexts, accumulators) = party_2.shuffle_decrypt(&ciphertexts, &accumulators);
+    (ciphertexts, accumulators) = party_3.shuffle_decrypt(&ciphertexts, &accumulators);
 
     let mut decryptions: Vec<RistrettoPoint> = vec![];
     for i in 0..10 {
-        decryptions.push(shuffled_ciphertexts_3[i].c2 - shuffled_accumulators_3[i]);
+        decryptions.push(ciphertexts[i].c2 - accumulators[i]);
     }
 
     println!("Decrypts");
@@ -231,26 +250,16 @@ fn main() {
         println!("{}", !decryption.is_identity());
     }
 
-    println!("BF1");
-    for bin in &bloom_filter_1.bins {
-        println!("{}", bin);
-    }
-    println!("BF2");
-    for bin in &bloom_filter_2.bins {
-        println!("{}", bin);
-    }
-    println!("BF3");
-    for bin in &bloom_filter_3.bins {
-        println!("{}", bin);
-    }
-
-    // let share_1 = &ciphertext_1 * &partial_key_1;
-    // let share_2 = &ciphertext_1 * &partial_key_2;
-    // let share_3 = &ciphertext_1 * &partial_key_3;
-    //
-    // let decryption = &ciphertext_2 - (&share_1 + &share_2 + &share_3);
-    //
-    // println!("{}", message == decryption);
-
-
+    // println!("BF1");
+    // for bin in &bloom_filter_1.bins {
+    //     println!("{}", bin);
+    // }
+    // println!("BF2");
+    // for bin in &bloom_filter_2.bins {
+    //     println!("{}", bin);
+    // }
+    // println!("BF3");
+    // for bin in &bloom_filter_3.bins {
+    //     println!("{}", bin);
+    // }
 }
