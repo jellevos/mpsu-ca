@@ -11,7 +11,9 @@ use bytevec::ByteEncodable;
 use std::ops::Add;
 use permutation_iterator::{Permutor};
 use curve25519_dalek::traits::{IsIdentity, Identity};
-use rand::RngCore;
+use rand::{RngCore, Rng};
+
+use structopt::StructOpt;
 
 macro_rules! define_add_variants {
     (LHS = $lhs:ty, RHS = $rhs:ty, Output = $out:ty) => {
@@ -206,11 +208,25 @@ impl<'a> Party<'a> {
     }
 }
 
+#[derive(StructOpt, Debug)]
+#[structopt(name = "mpsu-ca")]
+struct Opt {
+    #[structopt(short="n", long)]
+    party_count: u64,
+    #[structopt(short="k", long)]
+    set_size: u64,
+    #[structopt(short="d", long)]
+    domain_size: u64,
+}
+
 fn main() {
+    let opt = Opt::from_args();
+    println!("{:#?}", opt);
+
     println!("Hello, world!");
     let mut rng = OsRng;
 
-    let sets: Vec<Vec<u64>> = vec![vec![6, 3, 4], vec![2, 3, 4], vec![1, 3]];
+    let sets: Vec<Vec<u64>> = (0..opt.party_count).map(|_| (0..opt.set_size).map(|_| rng.gen_range(0, opt.domain_size)).collect()).collect();
 
     // TODO: Switch to using sets instead of lists as party input?
     let mut parties: Vec<Party> = sets.iter().map(|set| Party::create(rng, set)).collect();
