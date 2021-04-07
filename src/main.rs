@@ -212,7 +212,7 @@ impl<'a> Party<'a> {
 #[structopt(name = "mpsu-ca")]
 struct Opt {
     #[structopt(short="n", long)]
-    party_count: u64,
+    party_count: usize,
     #[structopt(short="k", long)]
     set_size: u64,
     #[structopt(short="d", long)]
@@ -254,7 +254,7 @@ fn main() {
 
     // Aggregate the ciphertexts and initialize the accumulators
     let mut ciphertexts: Vec<Ciphertext> = parties[0].ciphertexts.as_ref().unwrap().iter().copied().collect();
-    for i in 1..3 {
+    for i in 1..opt.party_count {
         ciphertexts = ciphertexts.iter().zip(parties[i].ciphertexts.as_ref().unwrap().iter()).map(|(a, b)| a + b).collect();
     }
     let mut accumulators: Vec<RistrettoPoint> = vec![RistrettoPoint::identity(); 10];
@@ -274,17 +274,4 @@ fn main() {
     for decryption in decryptions {
         println!("{}", !decryption.is_identity());
     }
-
-    // println!("BF1");
-    // for bin in &bloom_filter_1.bins {
-    //     println!("{}", bin);
-    // }
-    // println!("BF2");
-    // for bin in &bloom_filter_2.bins {
-    //     println!("{}", bin);
-    // }
-    // println!("BF3");
-    // for bin in &bloom_filter_3.bins {
-    //     println!("{}", bin);
-    // }
 }
