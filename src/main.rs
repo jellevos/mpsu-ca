@@ -13,6 +13,8 @@ use permutation_iterator::{Permutor};
 use curve25519_dalek::traits::{IsIdentity, Identity};
 use rand::{RngCore, Rng};
 
+use std::convert::TryInto;
+
 use structopt::StructOpt;
 
 macro_rules! define_add_variants {
@@ -43,8 +45,8 @@ macro_rules! define_add_variants {
 
 struct BloomFilter {
     bins: Vec<bool>,
-    bin_count: u32,
-    seeds: Vec<u32>,
+    bin_count: u64,
+    seeds: Vec<u64>,
 }
 
 impl BloomFilter {
@@ -53,7 +55,7 @@ impl BloomFilter {
         let element_bytes = element.encode::<u64>().unwrap();
 
         for seed in &self.seeds {
-            self.bins[(xx::hash32_with_seed(&element_bytes, *seed) % self.bin_count) as usize] = true;
+            self.bins[(xx::hash32_with_seed(&element_bytes, *seed as u32) as u64 % self.bin_count) as usize] = true;
         }
     }
 
@@ -61,7 +63,7 @@ impl BloomFilter {
         let element_bytes = element.encode::<u64>().unwrap();
 
         for seed in &self.seeds {
-            if !self.bins[(xx::hash32_with_seed(&element_bytes, *seed) % self.bin_count) as usize] {
+            if !self.bins[(xx::hash32_with_seed(&element_bytes, *seed as u32) as u64 % self.bin_count) as usize] {
                 return false;
             }
         }
@@ -128,6 +130,7 @@ struct Party<'a> {
     generator: RistrettoPoint,
     rng: OsRng,
     set: &'a Vec<u64>,
+    max_bins: u64,
     partial_key: Option<Scalar>,
     blinded_key: Option<RistrettoPoint>,
     public_key: Option<PublicKey>,
@@ -136,11 +139,12 @@ struct Party<'a> {
 }
 
 impl<'a> Party<'a> {
-    fn create(rng: OsRng, set: &'a Vec<u64>) -> Self {
+    fn create(rng: OsRng, set: &'a Vec<u64>, max_bins: u64) -> Self {
         Party {
             generator: RISTRETTO_BASEPOINT_POINT,
             rng,
             set,
+            max_bins,
             partial_key: None,
             blinded_key: None,
             public_key: None,
@@ -158,15 +162,15 @@ impl<'a> Party<'a> {
         self.public_key = Some(PublicKey::create(blinded_keys));
     }
 
-    fn build_bloom_filter(&mut self, m_bins: usize, h_hashes: u32) {
-        let mut seeds: Vec<u32> = vec![];
-        for i in 0..h_hashes {
+    fn build_bloom_filter(&mut self, m_bins: &u64, h_hashes: &u64) {
+        let mut seeds: Vec<u64> = vec![];
+        for i in 0..*h_hashes {
             seeds.push(i);
         }
 
         self.bloom_filter = Some(BloomFilter {
-            bins: vec![false; m_bins],
-            bin_count: m_bins as u32,
+            bins: vec![false; *m_bins as usize],
+            bin_count: *m_bins,
             seeds,
         });
 
@@ -200,7 +204,7 @@ impl<'a> Party<'a> {
             shuffled_ciphertexts.push(ciphertexts[permuted as usize]);
         }
 
-        for i in 0..10 {
+        for i in 0..shuffled_accumulators.len() {
             shuffled_accumulators[i] += shuffled_ciphertexts[i].c1 * &self.partial_key.unwrap();
         }
 
@@ -212,11 +216,52 @@ impl<'a> Party<'a> {
 #[structopt(name = "mpsu-ca")]
 struct Opt {
     #[structopt(short="n", long)]
-    party_count: usize,
+    party_count: u64,
     #[structopt(short="k", long)]
     set_size: u64,
     #[structopt(short="d", long)]
     domain_size: u64,
+    //#[structopt(short="s", long)]
+    //standard_deviation: u64,
+    #[structopt(short="m", long)]
+    max_bins: u64,
+}
+
+fn prob_0(n_elements: &u64, m_bins: &u64, h_hashes: &u64) -> f64 {
+    return (1f64 - (1f64 / *m_bins as f64)).powf((h_hashes * n_elements) as f64);
+}
+
+fn partial_binomial(n_elements: &u64, m_bins: &u64, h_hashes: &u64, x_ones: &u64) -> f64 {
+    let prob_of_0 = prob_0(n_elements, m_bins, h_hashes);
+    return (1f64 - prob_of_0).powf(*x_ones as f64);// * prob_of_0.powf((m_bins - x_ones) as f64);
+}
+
+fn compute_filter_params(m_bins: &u64, min_size: u64, max_size: u64) -> (u64, f64) {
+    let mut h_hashes = 1u64;
+    let mut variance = f64::MAX;
+
+    loop {
+        let mut probabilities: Vec<f64> = vec![];
+
+        for n in min_size..=max_size {
+            let probability: f64 = partial_binomial(&n, m_bins, &h_hashes, m_bins) /
+                (min_size..=max_size).map(|i| partial_binomial(&i, m_bins, &h_hashes, m_bins)).sum::<f64>();
+            probabilities.push(probability);
+        }
+
+        println!("yeet2");
+
+        let mean: f64 = probabilities.iter().enumerate().map(|(x, p)| x as f64 * p).sum();
+        let new_variance = probabilities.iter().enumerate().map(|(x, p)| p * (x as f64 - mean) * (x as f64 - mean)).sum();
+
+        println!("{}", new_variance);
+        if new_variance > variance {
+            return (h_hashes - 1, variance.sqrt());
+        }
+
+        variance = new_variance;
+        h_hashes += 1;
+    }
 }
 
 fn main() {
@@ -226,10 +271,13 @@ fn main() {
     println!("Hello, world!");
     let mut rng = OsRng;
 
-    let sets: Vec<Vec<u64>> = (0..opt.party_count).map(|_| (0..opt.set_size).map(|_| rng.gen_range(0, opt.domain_size)).collect()).collect();
+    let sets: Vec<Vec<u64>> = (0..opt.party_count).map(|_| (0..opt.set_size).map(|_| rng.gen_range(0, &opt.domain_size)).collect()).collect();
 
     // TODO: Switch to using sets instead of lists as party input?
-    let mut parties: Vec<Party> = sets.iter().map(|set| Party::create(rng, set)).collect();
+    let mut parties: Vec<Party> = sets.iter().map(|set| Party::create(rng, set, opt.max_bins)).collect();
+
+    let (hash_count_h, max_standard_deviation) = compute_filter_params(&opt.max_bins as &u64, opt.set_size, (opt.party_count * opt.set_size) as u64);
+    println!("Hash count: {}", hash_count_h);
 
     // Let parties generate their keys
     for party in parties.iter_mut() {
@@ -244,7 +292,7 @@ fn main() {
 
     // Let parties build their Bloom filters
     for party in parties.iter_mut() {
-        party.build_bloom_filter(10, 2);
+        party.build_bloom_filter(&opt.max_bins, &hash_count_h);
     }
 
     // Let parties build their ciphertexts
@@ -254,10 +302,10 @@ fn main() {
 
     // Aggregate the ciphertexts and initialize the accumulators
     let mut ciphertexts: Vec<Ciphertext> = parties[0].ciphertexts.as_ref().unwrap().iter().copied().collect();
-    for i in 1..opt.party_count {
+    for i in 1..(opt.party_count as usize) {
         ciphertexts = ciphertexts.iter().zip(parties[i].ciphertexts.as_ref().unwrap().iter()).map(|(a, b)| a + b).collect();
     }
-    let mut accumulators: Vec<RistrettoPoint> = vec![RistrettoPoint::identity(); 10];
+    let mut accumulators: Vec<RistrettoPoint> = vec![RistrettoPoint::identity(); opt.max_bins as usize];
 
     // Perform shuffle-decrypt protocol
     for party in parties.iter_mut() {
@@ -266,12 +314,15 @@ fn main() {
 
     // Perform the final combination step to decrypt
     let mut decryptions: Vec<RistrettoPoint> = vec![];
-    for i in 0..10 {
+    for i in 0..(opt.max_bins as usize) {
         decryptions.push(ciphertexts[i].c2 - accumulators[i]);
     }
 
-    println!("Decrypts");
-    for decryption in decryptions {
-        println!("{}", !decryption.is_identity());
-    }
+    // println!("Decrypts");
+    // for decryption in decryptions {
+    //     println!("{}", !decryption.is_identity());
+    // }
+
+    let total: u64 = decryptions.iter().map(|d| !d.is_identity() as u64).sum();
+    println!("Total: {}", total);
 }
