@@ -14,8 +14,10 @@ use curve25519_dalek::traits::{IsIdentity, Identity};
 use rand::{RngCore, Rng};
 
 use std::convert::TryInto;
+use std::iter::FromIterator;
 
 use structopt::StructOpt;
+use std::collections::HashSet;
 
 macro_rules! define_add_variants {
     (LHS = $lhs:ty, RHS = $rhs:ty, Output = $out:ty) => {
@@ -129,7 +131,7 @@ impl PublicKey {
 struct Party<'a> {
     generator: RistrettoPoint,
     rng: OsRng,
-    set: &'a Vec<u64>,
+    set: &'a HashSet<u64>,
     max_bins: u64,
     partial_key: Option<Scalar>,
     blinded_key: Option<RistrettoPoint>,
@@ -139,7 +141,7 @@ struct Party<'a> {
 }
 
 impl<'a> Party<'a> {
-    fn create(rng: OsRng, set: &'a Vec<u64>, max_bins: u64) -> Self {
+    fn create(rng: OsRng, set: &'a HashSet<u64>, max_bins: u64) -> Self {
         Party {
             generator: RISTRETTO_BASEPOINT_POINT,
             rng,
@@ -249,8 +251,6 @@ fn compute_filter_params(m_bins: &u64, min_size: u64, max_size: u64) -> (u64, f6
             probabilities.push(probability);
         }
 
-        println!("yeet2");
-
         let mean: f64 = probabilities.iter().enumerate().map(|(x, p)| x as f64 * p).sum();
         let new_variance = probabilities.iter().enumerate().map(|(x, p)| p * (x as f64 - mean) * (x as f64 - mean)).sum();
 
@@ -271,12 +271,14 @@ fn main() {
     println!("Hello, world!");
     let mut rng = OsRng;
 
-    let sets: Vec<Vec<u64>> = (0..opt.party_count).map(|_| (0..opt.set_size).map(|_| rng.gen_range(0, &opt.domain_size)).collect()).collect();
+    let sets: Vec<HashSet<u64>> = (0..opt.party_count).map(|_| HashSet::from_iter((0..opt.set_size).map(|_| rng.gen_range(0, &opt.domain_size)))).collect();
 
-    // TODO: Switch to using sets instead of lists as party input?
     let mut parties: Vec<Party> = sets.iter().map(|set| Party::create(rng, set, opt.max_bins)).collect();
 
-    let (hash_count_h, max_standard_deviation) = compute_filter_params(&opt.max_bins as &u64, opt.set_size, (opt.party_count * opt.set_size) as u64);
+    println!("Setup complete");
+
+    //let (hash_count_h, max_standard_deviation) = compute_filter_params(&opt.max_bins as &u64, opt.set_size, (opt.party_count * opt.set_size) as u64);
+    let hash_count_h = 1;
     println!("Hash count: {}", hash_count_h);
 
     // Let parties generate their keys
@@ -295,10 +297,14 @@ fn main() {
         party.build_bloom_filter(&opt.max_bins, &hash_count_h);
     }
 
+    println!("Encrypt");
+
     // Let parties build their ciphertexts
     for party in parties.iter_mut() {
         party.build_ciphertexts();
     }
+
+    println!("Aggregate");
 
     // Aggregate the ciphertexts and initialize the accumulators
     let mut ciphertexts: Vec<Ciphertext> = parties[0].ciphertexts.as_ref().unwrap().iter().copied().collect();
@@ -307,10 +313,15 @@ fn main() {
     }
     let mut accumulators: Vec<RistrettoPoint> = vec![RistrettoPoint::identity(); opt.max_bins as usize];
 
+    println!("Shuffle-decrypt");
+
     // Perform shuffle-decrypt protocol
     for party in parties.iter_mut() {
+        println!("Party");
         (ciphertexts, accumulators) = party.shuffle_decrypt(&ciphertexts, &accumulators);
     }
+
+    println!("Decrypt");
 
     // Perform the final combination step to decrypt
     let mut decryptions: Vec<RistrettoPoint> = vec![];
@@ -325,4 +336,12 @@ fn main() {
 
     let total: u64 = decryptions.iter().map(|d| !d.is_identity() as u64).sum();
     println!("Total: {}", total);
+
+    println!("Estimated set union cardinality: {}", -(opt.max_bins as f64) * (1f64 - total as f64 / opt.max_bins as f64).ln() / hash_count_h as f64);
+
+    let mut union: HashSet<u64> = HashSet::from_iter(vec![]);
+    for set in sets {
+        union = union.union(&set).cloned().collect();
+    }
+    println!("Actual set union cardinality: {}", union.len())
 }
