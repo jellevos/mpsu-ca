@@ -181,6 +181,27 @@ impl<'a> Party<'a> {
         }
     }
 
+    fn build_selective_bloom_filter(&mut self, m_bins: &u64, h_hashes: &u64, mask: &u32) {
+        let mut seeds: Vec<u64> = vec![];
+        for i in 0..*h_hashes {
+            seeds.push(i);
+        }
+
+        self.bloom_filter = Some(BloomFilter {
+            bins: vec![false; *m_bins as usize],
+            bin_count: *m_bins,
+            seeds,
+        });
+
+        for element in self.set {
+            let element_bytes = element.encode::<u64>().unwrap();
+            if (xx::hash32(element_bytes) & mask) == 0 {
+                // Only insert the element if the masked bits are all 0
+                self.bloom_filter.as_mut().unwrap().insert(element);
+            }
+        }
+    }
+
     fn build_ciphertexts(&mut self) {
         self.ciphertexts = Some(vec![]);
         for bin in &self.bloom_filter.as_ref().unwrap().bins {
@@ -229,6 +250,8 @@ struct Opt {
     max_bins: u64,
     #[structopt(short="c", long)]
     cardinality: u64,
+    #[structopt(short="M", long, default_value="0")]
+    selective_insertion_mask: u32,
 }
 
 fn prob_0(n_elements: &u64, m_bins: &u64, h_hashes: &u64) -> f64 {
@@ -320,7 +343,11 @@ fn main() {
 
     // Let parties build their Bloom filters
     for party in parties.iter_mut() {
-        party.build_bloom_filter(&opt.max_bins, &hash_count_h);
+        if opt.selective_insertion_mask == 0 {
+            party.build_bloom_filter(&opt.max_bins, &hash_count_h);
+        } else {
+            party.build_selective_bloom_filter(&opt.max_bins, &hash_count_h, &opt.selective_insertion_mask)
+        }
     }
 
     println!("Encrypt");
@@ -363,7 +390,11 @@ fn main() {
     let total: u64 = decryptions.iter().map(|d| !d.is_identity() as u64).sum();
     println!("Total: {}", total);
 
-    println!("Estimated set union cardinality: {}", -(opt.max_bins as f64) * (1f64 - total as f64 / opt.max_bins as f64).ln() / hash_count_h as f64);
+    if opt.selective_insertion_mask == 0 {
+        println!("Estimated set union cardinality: {}", -(opt.max_bins as f64) * (1f64 - total as f64 / opt.max_bins as f64).ln() / hash_count_h as f64);
+    } else {
+        println!("Estimated set union cardinality (DROPOUT): {}", -(opt.max_bins as f64) * (1f64 - total as f64 / (opt.max_bins as f64 / (1 << opt.selective_insertion_mask.count_ones()) as f64)).ln() / hash_count_h as f64);
+    }
 
     let mut union: HashSet<u64> = HashSet::from_iter(vec![]);
     for set in sets {
