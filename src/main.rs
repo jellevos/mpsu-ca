@@ -227,6 +227,8 @@ struct Opt {
     //standard_deviation: u64,
     #[structopt(short="m", long)]
     max_bins: u64,
+    #[structopt(short="c", long)]
+    cardinality: u64,
 }
 
 fn prob_0(n_elements: &u64, m_bins: &u64, h_hashes: &u64) -> f64 {
@@ -264,14 +266,38 @@ fn compute_filter_params(m_bins: &u64, min_size: u64, max_size: u64) -> (u64, f6
     }
 }
 
+fn generate_sets(mut rng: OsRng, set_count: u64, set_size: u64, domain_size: u64, union_cardinality: u64) -> Vec<HashSet<u64>> {
+    // TODO: Make sure union is has union_cardinality length
+    let union: Vec<u64> = (0..union_cardinality).map(|_| rng.gen_range(0, &domain_size)).collect();
+    let mut sets: Vec<HashSet<u64>> = vec![HashSet::from_iter(vec![]); set_count as usize];
+    //for i in 0..(set_count * set_size) {
+    //    sets[(i % set_size) as usize].insert()
+    //}
+    for (index, element) in union.iter().enumerate() {
+        sets[index % set_count as usize].insert(element.clone());
+    };
+    for i in 0..set_count {
+        while sets[i as usize].len() < set_size as usize {
+            sets[i as usize].insert(union[rng.gen_range(0, union_cardinality) as usize]);
+        }
+    }
+
+    return sets;
+
+    //let intersection_size = (set_count * set_size - union_cardinality) / set_count;
+    //let intersection: HashSet<u64> = (0..opt.set_size).map(|_| rng.gen_range(0, &opt.domain_size)).collect();
+    //let remaining_elements: HashSet<u64> =
+}
+
 fn main() {
-    let opt = Opt::from_args();
+    let opt: Opt = Opt::from_args();
     println!("{:#?}", opt);
 
     println!("Hello, world!");
     let mut rng = OsRng;
 
-    let sets: Vec<HashSet<u64>> = (0..opt.party_count).map(|_| HashSet::from_iter((0..opt.set_size).map(|_| rng.gen_range(0, &opt.domain_size)))).collect();
+    //let sets: Vec<HashSet<u64>> = (0..opt.party_count).map(|_| HashSet::from_iter((0..opt.set_size).map(|_| rng.gen_range(0, &opt.domain_size)))).collect();
+    let sets = generate_sets(rng, opt.party_count, opt.set_size, opt.domain_size, opt.cardinality);
 
     let mut parties: Vec<Party> = sets.iter().map(|set| Party::create(rng, set, opt.max_bins)).collect();
 
