@@ -13,11 +13,12 @@ use permutation_iterator::{Permutor};
 use curve25519_dalek::traits::{IsIdentity, Identity};
 use rand::{RngCore, Rng};
 
-use std::convert::TryInto;
 use std::iter::FromIterator;
 
 use structopt::StructOpt;
 use std::collections::HashSet;
+
+use std::time::Instant;
 
 macro_rules! define_add_variants {
     (LHS = $lhs:ty, RHS = $rhs:ty, Output = $out:ty) => {
@@ -322,6 +323,7 @@ fn main() {
     //let sets: Vec<HashSet<u64>> = (0..opt.party_count).map(|_| HashSet::from_iter((0..opt.set_size).map(|_| rng.gen_range(0, &opt.domain_size)))).collect();
     let sets = generate_sets(rng, opt.party_count, opt.set_size, opt.domain_size, opt.cardinality);
 
+    let now = Instant::now();
     let mut parties: Vec<Party> = sets.iter().map(|set| Party::create(rng, set, opt.max_bins)).collect();
 
     println!("Setup complete");
@@ -340,7 +342,9 @@ fn main() {
     for party in parties.iter_mut() {
         party.generate_public_key(&blinded_keys);
     }
+    println!("{}", now.elapsed().as_millis());
 
+    let now = Instant::now();
     // Let parties build their Bloom filters
     for party in parties.iter_mut() {
         if opt.selective_insertion_mask == 0 {
@@ -356,18 +360,20 @@ fn main() {
     for party in parties.iter_mut() {
         party.build_ciphertexts();
     }
+    println!("{}", now.elapsed().as_millis());
 
     println!("Aggregate");
-
+    let now = Instant::now();
     // Aggregate the ciphertexts and initialize the accumulators
     let mut ciphertexts: Vec<Ciphertext> = parties[0].ciphertexts.as_ref().unwrap().iter().copied().collect();
     for i in 1..(opt.party_count as usize) {
         ciphertexts = ciphertexts.iter().zip(parties[i].ciphertexts.as_ref().unwrap().iter()).map(|(a, b)| a + b).collect();
     }
     let mut accumulators: Vec<RistrettoPoint> = vec![RistrettoPoint::identity(); opt.max_bins as usize];
+    println!("{}", now.elapsed().as_millis());
 
     println!("Shuffle-decrypt");
-
+    let now = Instant::now();
     // Perform shuffle-decrypt protocol
     for party in parties.iter_mut() {
         println!("Party");
@@ -388,6 +394,7 @@ fn main() {
     // }
 
     let total: u64 = decryptions.iter().map(|d| !d.is_identity() as u64).sum();
+    println!("{}", now.elapsed().as_millis());
     println!("Total: {}", total);
 
     if opt.selective_insertion_mask == 0 {
