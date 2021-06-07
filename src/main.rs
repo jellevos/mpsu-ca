@@ -196,7 +196,7 @@ impl<'a> Party<'a> {
 
         for element in self.set {
             let element_bytes = element.encode::<u64>().unwrap();
-            if (xx::hash32(element_bytes) & mask) == 0 {
+            if (xx::hash32_with_seed(element_bytes, 1337) & mask) == 0 {
                 // Only insert the element if the masked bits are all 0
                 self.bloom_filter.as_mut().unwrap().insert(element);
             }
@@ -400,7 +400,8 @@ fn main() {
     if opt.selective_insertion_mask == 0 {
         println!("Estimated set union cardinality: {}", -(opt.max_bins as f64) * (1f64 - total as f64 / opt.max_bins as f64).ln() / hash_count_h as f64);
     } else {
-        println!("Estimated set union cardinality (DROPOUT): {}", -(opt.max_bins as f64) * (1f64 - total as f64 / (opt.max_bins as f64 / (1 << opt.selective_insertion_mask.count_ones()) as f64)).ln() / hash_count_h as f64);
+        println!("DEBUG: {}", (1f64 - total as f64 / (opt.max_bins as f64 / (1 << opt.selective_insertion_mask.count_ones()) as f64)));
+        println!("Estimated set union cardinality (DROPOUT): {}", -(opt.max_bins as f64) * (1 << opt.selective_insertion_mask.count_ones()) as f64 * (1f64 - total as f64 / opt.max_bins as f64).ln() / hash_count_h as f64);
     }
 
     let mut union: HashSet<u64> = HashSet::from_iter(vec![]);
