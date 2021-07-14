@@ -119,12 +119,9 @@ impl PublicKey {
         }
     }
 
-    fn encrypt_identity(&self, rng: &mut OsRng) -> Ciphertext {
+    fn encrypt_identity(&self, rng: &mut OsRng) -> (RistrettoPoint, RistrettoPoint) {
         let randomness = Scalar::random(rng);
-        Ciphertext {
-            c1: &randomness * &RISTRETTO_BASEPOINT_POINT,
-            c2: &randomness * &self.point,
-        }
+        return (&randomness * &RISTRETTO_BASEPOINT_POINT, &randomness * &self.point);
     }
 
 }
@@ -138,7 +135,8 @@ struct Party<'a> {
     blinded_key: Option<RistrettoPoint>,
     public_key: Option<PublicKey>,
     bloom_filter: Option<BloomFilter>,
-    ciphertexts: Option<Vec<Ciphertext>>,
+    alphas: Option<Vec<RistrettoPoint>>,
+    betas: Option<Vec<RistrettoPoint>>
 }
 
 impl<'a> Party<'a> {
@@ -152,7 +150,8 @@ impl<'a> Party<'a> {
             blinded_key: None,
             public_key: None,
             bloom_filter: None,
-            ciphertexts: None,
+            alphas: None,
+            betas: None,
         }
     }
 
@@ -204,35 +203,46 @@ impl<'a> Party<'a> {
     }
 
     fn build_ciphertexts(&mut self) {
-        self.ciphertexts = Some(vec![]);
+        self.alphas = Some(vec![]);
+        self.betas = Some(vec![]);
         for bin in &self.bloom_filter.as_ref().unwrap().bins {
             if *bin {
-                self.ciphertexts.as_mut().unwrap().push(Ciphertext {
-                    c1: RistrettoPoint::random(&mut self.rng),
-                    c2: RistrettoPoint::random(&mut self.rng) });
+                self.alphas.as_mut().unwrap().push(RistrettoPoint::random(&mut self.rng));
+                self.betas.as_mut().unwrap().push(RistrettoPoint::random(&mut self.rng));
             } else {
-                self.ciphertexts.as_mut().unwrap().push(self.public_key.as_ref().unwrap().encrypt_identity(&mut self.rng));
+                //let (alpha, beta) = self.public_key.as_ref().unwrap().encrypt_identity(&mut self.rng);
+                let randomness = Scalar::random(&mut self.rng);
+                self.alphas.as_mut().unwrap().push(&randomness * &RISTRETTO_BASEPOINT_POINT);
+                self.betas.as_mut().unwrap().push(&randomness * &self.blinded_key.unwrap());
             }
         }
     }
 
-    fn shuffle_decrypt(&mut self, ciphertexts: &Vec<Ciphertext>, accumulators: &Vec<RistrettoPoint>)
-        -> (Vec<Ciphertext>, Vec<RistrettoPoint>) {
+    fn shuffle_decrypt(&mut self, alphas: &Vec<Vec<RistrettoPoint>>, betas: &Vec<RistrettoPoint>, public_keys: &Vec<RistrettoPoint>)
+        -> (Vec<Vec<RistrettoPoint>>, Vec<RistrettoPoint>) {
         let permutation_key: u64 = self.rng.next_u64();
         let permutor = Permutor::new_with_u64_key(self.bloom_filter.as_ref().unwrap().bin_count as u64, permutation_key);
 
-        let mut shuffled_accumulators: Vec<RistrettoPoint> = vec![];
-        let mut shuffled_ciphertexts: Vec<Ciphertext> = vec![];
+        let mut shuffled_alphas: Vec<Vec<RistrettoPoint>> = vec![];
+        let mut shuffled_betas: Vec<RistrettoPoint> = vec![];
         for permuted in permutor {
-            shuffled_accumulators.push(accumulators[permuted as usize]);
-            shuffled_ciphertexts.push(ciphertexts[permuted as usize]);
+            let current_alphas = &alphas[permuted as usize];
+
+            let mut new_alphas = vec![];
+            let mut new_beta = betas[permuted as usize] - self.partial_key.unwrap() * current_alphas.last().unwrap();
+
+            for (alpha, public_key) in current_alphas[..current_alphas.len()-1].iter().zip(public_keys) {
+                let randomness = Scalar::random(&mut self.rng);
+
+                new_alphas.push(alpha + &randomness * &RISTRETTO_BASEPOINT_POINT);
+                new_beta += &randomness * public_key;
+            }
+
+            shuffled_alphas.push(new_alphas);
+            shuffled_betas.push(new_beta);
         }
 
-        for i in 0..shuffled_accumulators.len() {
-            shuffled_accumulators[i] += shuffled_ciphertexts[i].c1 * &self.partial_key.unwrap();
-        }
-
-        (shuffled_ciphertexts, shuffled_accumulators)
+        (shuffled_alphas, shuffled_betas)
     }
 }
 
@@ -245,8 +255,6 @@ struct Opt {
     set_size: u64,
     #[structopt(short="d", long)]
     domain_size: u64,
-    //#[structopt(short="s", long)]
-    //standard_deviation: u64,
     #[structopt(short="m", long)]
     max_bins: u64,
     #[structopt(short="c", long)]
@@ -339,9 +347,9 @@ fn main() {
 
     // Let parties generate the public key
     let blinded_keys: Vec<RistrettoPoint> = parties.iter().map(|party| party.blinded_key.unwrap()).collect();
-    for party in parties.iter_mut() {
-        party.generate_public_key(&blinded_keys);
-    }
+    // for party in parties.iter_mut() {
+    //     party.generate_public_key(&blinded_keys);
+    // }
     println!("{}", now.elapsed().as_millis());
 
     let now = Instant::now();
@@ -365,27 +373,28 @@ fn main() {
     println!("Aggregate");
     let now = Instant::now();
     // Aggregate the ciphertexts and initialize the accumulators
-    let mut ciphertexts: Vec<Ciphertext> = parties[0].ciphertexts.as_ref().unwrap().iter().copied().collect();
+    let mut alphas: Vec<Vec<RistrettoPoint>> = (0..opt.max_bins).map(|j| parties.iter().map(|p| p.alphas.as_ref().unwrap()[j as usize]).collect::<Vec<RistrettoPoint>>()).collect();
+
+    let mut betas: Vec<RistrettoPoint> = parties[0].betas.as_ref().unwrap().iter().copied().collect();
     for i in 1..(opt.party_count as usize) {
-        ciphertexts = ciphertexts.iter().zip(parties[i].ciphertexts.as_ref().unwrap().iter()).map(|(a, b)| a + b).collect();
+        betas = betas.iter().zip(parties[i].betas.as_ref().unwrap().iter()).map(|(a, b)| a + b).collect();
     }
-    let mut accumulators: Vec<RistrettoPoint> = vec![RistrettoPoint::identity(); opt.max_bins as usize];
     println!("{}", now.elapsed().as_millis());
 
     println!("Shuffle-decrypt");
     let now = Instant::now();
     // Perform shuffle-decrypt protocol
-    for party in parties.iter_mut() {
+    for party in parties[1..].iter_mut().rev() {
         println!("Party");
-        (ciphertexts, accumulators) = party.shuffle_decrypt(&ciphertexts, &accumulators);
+        (alphas, betas) = party.shuffle_decrypt(&alphas, &betas, &blinded_keys);
     }
 
     println!("Decrypt");
 
     // Perform the final combination step to decrypt
     let mut decryptions: Vec<RistrettoPoint> = vec![];
-    for i in 0..(opt.max_bins as usize) {
-        decryptions.push(ciphertexts[i].c2 - accumulators[i]);
+    for j in 0..(opt.max_bins as usize) {
+        decryptions.push(betas[j] - parties[0].partial_key.unwrap() * alphas[j].first().unwrap());
     }
 
     // println!("Decrypts");
