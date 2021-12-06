@@ -2,9 +2,11 @@
 This library lets `n` parties who each have a set of `k` elements estimate how many disctinct elements they have without
 revealing the actual elements. We proposed this protocol in the paper:
 
-**Compare Before You Buy: Privacy-Preserving
-Selection of Threat Intelligence Providers**<br>
+[**Compare Before You Buy: Privacy-Preserving
+Selection of Threat Intelligence Providers**](https://eprint.iacr.org/2021/1260)<br>
 *Jelle Vos (me), Zekeriya Erkin and Christian Doerr.*
+
+For a short overview of this work, have a look at our [infographic](infographic.pdf)!
 
 ## Building the project
 You can build the project if you have `cargo` installed using `cargo build --release`.
