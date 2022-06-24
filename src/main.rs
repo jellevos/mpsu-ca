@@ -1,5 +1,3 @@
-#![feature(destructuring_assignment)]
-
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::scalar::Scalar;
 
