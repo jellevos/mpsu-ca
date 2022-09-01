@@ -52,8 +52,8 @@ impl Add for &Ciphertext {
 
     fn add(self, rhs: Self) -> Self::Output {
         Ciphertext {
-            c1: &self.c1 + &rhs.c1,
-            c2: &self.c2 + &rhs.c2,
+            c1: self.c1 + rhs.c1,
+            c2: self.c2 + rhs.c2,
         }
     }
 }
@@ -87,7 +87,7 @@ impl<'a> Party<'a> {
 
     fn generate_keys(&mut self) {
         self.partial_key = Some(Scalar::random(&mut self.rng));
-        self.blinded_key = Some(&self.partial_key.unwrap() * &self.generator)
+        self.blinded_key = Some(self.partial_key.unwrap() * self.generator)
     }
 
     fn build_bloom_filter(&mut self, m_bins: usize, h_hashes: usize) {
@@ -100,7 +100,7 @@ impl<'a> Party<'a> {
         for element in &self.set.elements {
             // Only instert the element if the masked bits of this hash (with a constant seed) are all 0
             let element_bytes = (*element as u64).encode::<u64>().unwrap();
-            if (hash64_with_seed(&element_bytes, 1337 as u64) & mask) != 0 {
+            if (hash64_with_seed(&element_bytes, 1337) & mask) != 0 {
                 continue;
             }
 
@@ -131,19 +131,19 @@ impl<'a> Party<'a> {
                 self.alphas
                     .as_mut()
                     .unwrap()
-                    .push(&randomness * &RISTRETTO_BASEPOINT_POINT);
+                    .push(randomness * RISTRETTO_BASEPOINT_POINT);
                 self.betas
                     .as_mut()
                     .unwrap()
-                    .push(&randomness * &self.blinded_key.unwrap());
+                    .push(randomness * self.blinded_key.unwrap());
             }
         }
     }
 
     fn shuffle_decrypt(
         &mut self,
-        alphas: &Vec<Vec<RistrettoPoint>>,
-        betas: &Vec<RistrettoPoint>,
+        alphas: &[Vec<RistrettoPoint>],
+        betas: &[RistrettoPoint],
         public_keys: &Vec<RistrettoPoint>,
     ) -> (Vec<Vec<RistrettoPoint>>, Vec<RistrettoPoint>) {
         let permutation_key: u64 = self.rng.next_u64();
@@ -167,8 +167,8 @@ impl<'a> Party<'a> {
             {
                 let randomness = Scalar::random(&mut self.rng);
 
-                new_alphas.push(alpha + &randomness * &RISTRETTO_BASEPOINT_POINT);
-                new_beta += &randomness * public_key;
+                new_alphas.push(alpha + randomness * RISTRETTO_BASEPOINT_POINT);
+                new_beta += randomness * public_key;
             }
 
             shuffled_alphas.push(new_alphas);
@@ -270,12 +270,11 @@ fn main() {
         })
         .collect();
 
-    let mut betas: Vec<RistrettoPoint> =
-        parties[0].betas.as_ref().unwrap().iter().copied().collect();
-    for i in 1..(opt.party_count as usize) {
+    let mut betas: Vec<RistrettoPoint> = parties[0].betas.as_ref().unwrap().to_vec();
+    for party in parties.iter().take(opt.party_count as usize).skip(1) {
         betas = betas
             .iter()
-            .zip(parties[i].betas.as_ref().unwrap().iter())
+            .zip(party.betas.as_ref().unwrap().iter())
             .map(|(a, b)| a + b)
             .collect();
     }
