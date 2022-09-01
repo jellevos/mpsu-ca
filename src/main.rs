@@ -1,16 +1,16 @@
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::scalar::Scalar;
 
-use rand::rngs::OsRng;
 use curve25519_dalek::ristretto::RistrettoPoint;
+use rand::rngs::OsRng;
 
 use bytevec::ByteEncodable;
-use sets_multisets::sets::{gen_sets_with_union, Set, bloom_filter_indices};
-use xxh3::hash64_with_seed;
-use std::ops::Add;
-use permutation_iterator::{Permutor};
 use curve25519_dalek::traits::IsIdentity;
+use permutation_iterator::Permutor;
 use rand::RngCore;
+use sets_multisets::sets::{bloom_filter_indices, gen_sets_with_union, Set};
+use std::ops::Add;
+use xxh3::hash64_with_seed;
 
 use structopt::StructOpt;
 
@@ -68,7 +68,7 @@ struct Party<'a> {
     blinded_key: Option<RistrettoPoint>,
     bloom_filter: Option<Vec<bool>>,
     alphas: Option<Vec<RistrettoPoint>>,
-    betas: Option<Vec<RistrettoPoint>>
+    betas: Option<Vec<RistrettoPoint>>,
 }
 
 impl<'a> Party<'a> {
@@ -117,21 +117,40 @@ impl<'a> Party<'a> {
         self.betas = Some(vec![]);
         for bin in self.bloom_filter.as_ref().unwrap() {
             if *bin {
-                self.alphas.as_mut().unwrap().push(RistrettoPoint::random(&mut self.rng));
-                self.betas.as_mut().unwrap().push(RistrettoPoint::random(&mut self.rng));
+                self.alphas
+                    .as_mut()
+                    .unwrap()
+                    .push(RistrettoPoint::random(&mut self.rng));
+                self.betas
+                    .as_mut()
+                    .unwrap()
+                    .push(RistrettoPoint::random(&mut self.rng));
             } else {
                 //let (alpha, beta) = self.public_key.as_ref().unwrap().encrypt_identity(&mut self.rng);
                 let randomness = Scalar::random(&mut self.rng);
-                self.alphas.as_mut().unwrap().push(&randomness * &RISTRETTO_BASEPOINT_POINT);
-                self.betas.as_mut().unwrap().push(&randomness * &self.blinded_key.unwrap());
+                self.alphas
+                    .as_mut()
+                    .unwrap()
+                    .push(&randomness * &RISTRETTO_BASEPOINT_POINT);
+                self.betas
+                    .as_mut()
+                    .unwrap()
+                    .push(&randomness * &self.blinded_key.unwrap());
             }
         }
     }
 
-    fn shuffle_decrypt(&mut self, alphas: &Vec<Vec<RistrettoPoint>>, betas: &Vec<RistrettoPoint>, public_keys: &Vec<RistrettoPoint>)
-        -> (Vec<Vec<RistrettoPoint>>, Vec<RistrettoPoint>) {
+    fn shuffle_decrypt(
+        &mut self,
+        alphas: &Vec<Vec<RistrettoPoint>>,
+        betas: &Vec<RistrettoPoint>,
+        public_keys: &Vec<RistrettoPoint>,
+    ) -> (Vec<Vec<RistrettoPoint>>, Vec<RistrettoPoint>) {
         let permutation_key: u64 = self.rng.next_u64();
-        let permutor = Permutor::new_with_u64_key(self.bloom_filter.as_ref().unwrap().len() as u64, permutation_key);
+        let permutor = Permutor::new_with_u64_key(
+            self.bloom_filter.as_ref().unwrap().len() as u64,
+            permutation_key,
+        );
 
         let mut shuffled_alphas: Vec<Vec<RistrettoPoint>> = vec![];
         let mut shuffled_betas: Vec<RistrettoPoint> = vec![];
@@ -139,9 +158,13 @@ impl<'a> Party<'a> {
             let current_alphas = &alphas[permuted as usize];
 
             let mut new_alphas = vec![];
-            let mut new_beta = betas[permuted as usize] - self.partial_key.unwrap() * current_alphas.last().unwrap();
+            let mut new_beta = betas[permuted as usize]
+                - self.partial_key.unwrap() * current_alphas.last().unwrap();
 
-            for (alpha, public_key) in current_alphas[..current_alphas.len()-1].iter().zip(public_keys) {
+            for (alpha, public_key) in current_alphas[..current_alphas.len() - 1]
+                .iter()
+                .zip(public_keys)
+            {
                 let randomness = Scalar::random(&mut self.rng);
 
                 new_alphas.push(alpha + &randomness * &RISTRETTO_BASEPOINT_POINT);
@@ -159,17 +182,17 @@ impl<'a> Party<'a> {
 #[derive(StructOpt, Debug)]
 #[structopt(name = "mpsu-ca")]
 struct Opt {
-    #[structopt(short="n", long)]
+    #[structopt(short = "n", long)]
     party_count: usize,
-    #[structopt(short="k", long)]
+    #[structopt(short = "k", long)]
     set_size: usize,
-    #[structopt(short="d", long)]
+    #[structopt(short = "d", long)]
     domain_size: usize,
-    #[structopt(short="m", long)]
+    #[structopt(short = "m", long)]
     max_bins: usize,
-    #[structopt(short="c", long)]
+    #[structopt(short = "c", long)]
     cardinality: usize,
-    #[structopt(short="M", long, default_value="0")]
+    #[structopt(short = "M", long, default_value = "0")]
     selective_insertion_mask: u64,
 }
 
@@ -182,7 +205,12 @@ fn main() {
 
     //let sets: Vec<HashSet<u64>> = (0..opt.party_count).map(|_| HashSet::from_iter((0..opt.set_size).map(|_| rng.gen_range(0, &opt.domain_size)))).collect();
     //let sets = generate_sets(rng, opt.party_count, opt.set_size, opt.domain_size, opt.cardinality);
-    let sets = gen_sets_with_union(opt.party_count, opt.set_size, opt.domain_size, opt.cardinality);
+    let sets = gen_sets_with_union(
+        opt.party_count,
+        opt.set_size,
+        opt.domain_size,
+        opt.cardinality,
+    );
 
     let now = Instant::now();
     let mut parties: Vec<Party> = sets.iter().map(|set| Party::create(rng, set)).collect();
@@ -199,7 +227,10 @@ fn main() {
     }
 
     // Let parties generate the public key
-    let blinded_keys: Vec<RistrettoPoint> = parties.iter().map(|party| party.blinded_key.unwrap()).collect();
+    let blinded_keys: Vec<RistrettoPoint> = parties
+        .iter()
+        .map(|party| party.blinded_key.unwrap())
+        .collect();
     // for party in parties.iter_mut() {
     //     party.generate_public_key(&blinded_keys);
     // }
@@ -211,7 +242,11 @@ fn main() {
         if opt.selective_insertion_mask == 0 {
             party.build_bloom_filter(opt.max_bins, hash_count_h);
         } else {
-            party.build_selective_bloom_filter(opt.max_bins, hash_count_h, opt.selective_insertion_mask)
+            party.build_selective_bloom_filter(
+                opt.max_bins,
+                hash_count_h,
+                opt.selective_insertion_mask,
+            )
         }
     }
 
@@ -226,11 +261,23 @@ fn main() {
     println!("Aggregate");
     let now = Instant::now();
     // Aggregate the ciphertexts and initialize the accumulators
-    let mut alphas: Vec<Vec<RistrettoPoint>> = (0..opt.max_bins).map(|j| parties.iter().map(|p| p.alphas.as_ref().unwrap()[j as usize]).collect::<Vec<RistrettoPoint>>()).collect();
+    let mut alphas: Vec<Vec<RistrettoPoint>> = (0..opt.max_bins)
+        .map(|j| {
+            parties
+                .iter()
+                .map(|p| p.alphas.as_ref().unwrap()[j as usize])
+                .collect::<Vec<RistrettoPoint>>()
+        })
+        .collect();
 
-    let mut betas: Vec<RistrettoPoint> = parties[0].betas.as_ref().unwrap().iter().copied().collect();
+    let mut betas: Vec<RistrettoPoint> =
+        parties[0].betas.as_ref().unwrap().iter().copied().collect();
     for i in 1..(opt.party_count as usize) {
-        betas = betas.iter().zip(parties[i].betas.as_ref().unwrap().iter()).map(|(a, b)| a + b).collect();
+        betas = betas
+            .iter()
+            .zip(parties[i].betas.as_ref().unwrap().iter())
+            .map(|(a, b)| a + b)
+            .collect();
     }
     println!("{}", now.elapsed().as_millis());
 
@@ -260,10 +307,26 @@ fn main() {
     println!("Total: {}", total);
 
     if opt.selective_insertion_mask == 0 {
-        println!("Estimated set union cardinality: {}", -(opt.max_bins as f64) * (1f64 - total as f64 / opt.max_bins as f64).ln() / hash_count_h as f64);
+        println!(
+            "Estimated set union cardinality: {}",
+            -(opt.max_bins as f64) * (1f64 - total as f64 / opt.max_bins as f64).ln()
+                / hash_count_h as f64
+        );
     } else {
-        println!("DEBUG: {}", (1f64 - total as f64 / (opt.max_bins as f64 / (1 << opt.selective_insertion_mask.count_ones()) as f64)));
-        println!("Estimated set union cardinality (DROPOUT): {}", -(opt.max_bins as f64) * (1 << opt.selective_insertion_mask.count_ones()) as f64 * (1f64 - total as f64 / opt.max_bins as f64).ln() / hash_count_h as f64);
+        println!(
+            "DEBUG: {}",
+            (1f64
+                - total as f64
+                    / (opt.max_bins as f64
+                        / (1 << opt.selective_insertion_mask.count_ones()) as f64))
+        );
+        println!(
+            "Estimated set union cardinality (DROPOUT): {}",
+            -(opt.max_bins as f64)
+                * (1 << opt.selective_insertion_mask.count_ones()) as f64
+                * (1f64 - total as f64 / opt.max_bins as f64).ln()
+                / hash_count_h as f64
+        );
     }
 
     let union = Set::union(&sets);
