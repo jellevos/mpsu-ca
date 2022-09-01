@@ -4,17 +4,15 @@ use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
 use curve25519_dalek::ristretto::RistrettoPoint;
 
-use fasthash::xx;
 use bytevec::ByteEncodable;
+use sets_multisets::sets::{gen_sets_with_union, Set, bloom_filter_indices};
+use xxh3::hash64_with_seed;
 use std::ops::Add;
 use permutation_iterator::{Permutor};
-use curve25519_dalek::traits::{IsIdentity, Identity};
-use rand::{RngCore, Rng};
-
-use std::iter::FromIterator;
+use curve25519_dalek::traits::IsIdentity;
+use rand::RngCore;
 
 use structopt::StructOpt;
-use std::collections::HashSet;
 
 use std::time::Instant;
 
@@ -43,37 +41,6 @@ macro_rules! define_add_variants {
     };
 }
 
-
-struct BloomFilter {
-    bins: Vec<bool>,
-    bin_count: u64,
-    seeds: Vec<u64>,
-}
-
-impl BloomFilter {
-
-    fn insert(&mut self, element: &u64) {
-        let element_bytes = element.encode::<u64>().unwrap();
-
-        for seed in &self.seeds {
-            self.bins[(xx::hash32_with_seed(&element_bytes, *seed as u32) as u64 % self.bin_count) as usize] = true;
-        }
-    }
-
-    fn contains(&self, element: &u64) -> bool {
-        let element_bytes = element.encode::<u64>().unwrap();
-
-        for seed in &self.seeds {
-            if !self.bins[(xx::hash32_with_seed(&element_bytes, *seed as u32) as u64 % self.bin_count) as usize] {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-}
-
 #[derive(Copy, Clone)]
 struct Ciphertext {
     c1: RistrettoPoint,
@@ -93,60 +60,25 @@ impl Add for &Ciphertext {
 
 define_add_variants!(LHS = Ciphertext, RHS = Ciphertext, Output = Ciphertext);
 
-struct PublicKey {
-    point: RistrettoPoint,
-}
-
-impl PublicKey {
-
-    fn create(blinded_keys: &Vec<RistrettoPoint>) -> Self {
-        let mut point = blinded_keys[0];
-
-        for i in 1..blinded_keys.len() {
-            point += blinded_keys[i];
-        };
-
-        PublicKey {point}
-    }
-
-    fn encrypt(&self, rng: &mut OsRng, message: &RistrettoPoint) -> Ciphertext {
-        let randomness = Scalar::random(rng);
-        Ciphertext {
-            c1: &randomness * &RISTRETTO_BASEPOINT_POINT,
-            c2: message + (&randomness * &self.point),
-        }
-    }
-
-    fn encrypt_identity(&self, rng: &mut OsRng) -> (RistrettoPoint, RistrettoPoint) {
-        let randomness = Scalar::random(rng);
-        return (&randomness * &RISTRETTO_BASEPOINT_POINT, &randomness * &self.point);
-    }
-
-}
-
 struct Party<'a> {
     generator: RistrettoPoint,
     rng: OsRng,
-    set: &'a HashSet<u64>,
-    max_bins: u64,
+    set: &'a Set,
     partial_key: Option<Scalar>,
     blinded_key: Option<RistrettoPoint>,
-    public_key: Option<PublicKey>,
-    bloom_filter: Option<BloomFilter>,
+    bloom_filter: Option<Vec<bool>>,
     alphas: Option<Vec<RistrettoPoint>>,
     betas: Option<Vec<RistrettoPoint>>
 }
 
 impl<'a> Party<'a> {
-    fn create(rng: OsRng, set: &'a HashSet<u64>, max_bins: u64) -> Self {
+    fn create(rng: OsRng, set: &'a Set) -> Self {
         Party {
             generator: RISTRETTO_BASEPOINT_POINT,
             rng,
             set,
-            max_bins,
             partial_key: None,
             blinded_key: None,
-            public_key: None,
             bloom_filter: None,
             alphas: None,
             betas: None,
@@ -158,52 +90,32 @@ impl<'a> Party<'a> {
         self.blinded_key = Some(&self.partial_key.unwrap() * &self.generator)
     }
 
-    fn generate_public_key(&mut self, blinded_keys: &Vec<RistrettoPoint>) {
-        self.public_key = Some(PublicKey::create(blinded_keys));
+    fn build_bloom_filter(&mut self, m_bins: usize, h_hashes: usize) {
+        self.bloom_filter = Some(self.set.to_bloom_filter(m_bins, h_hashes))
     }
 
-    fn build_bloom_filter(&mut self, m_bins: &u64, h_hashes: &u64) {
-        let mut seeds: Vec<u64> = vec![];
-        for i in 0..*h_hashes {
-            seeds.push(i);
-        }
+    fn build_selective_bloom_filter(&mut self, m_bins: usize, h_hashes: usize, mask: u64) {
+        let mut bloom_filter = vec![false; m_bins];
 
-        self.bloom_filter = Some(BloomFilter {
-            bins: vec![false; *m_bins as usize],
-            bin_count: *m_bins,
-            seeds,
-        });
+        for element in &self.set.elements {
+            // Only instert the element if the masked bits of this hash (with a constant seed) are all 0
+            let element_bytes = (*element as u64).encode::<u64>().unwrap();
+            if (hash64_with_seed(&element_bytes, 1337 as u64) & mask) != 0 {
+                continue;
+            }
 
-        for element in self.set {
-            self.bloom_filter.as_mut().unwrap().insert(element);
-        }
-    }
-
-    fn build_selective_bloom_filter(&mut self, m_bins: &u64, h_hashes: &u64, mask: &u32) {
-        let mut seeds: Vec<u64> = vec![];
-        for i in 0..*h_hashes {
-            seeds.push(i);
-        }
-
-        self.bloom_filter = Some(BloomFilter {
-            bins: vec![false; *m_bins as usize],
-            bin_count: *m_bins,
-            seeds,
-        });
-
-        for element in self.set {
-            let element_bytes = element.encode::<u64>().unwrap();
-            if (xx::hash32_with_seed(element_bytes, 1337) & mask) == 0 {
-                // Only insert the element if the masked bits are all 0
-                self.bloom_filter.as_mut().unwrap().insert(element);
+            for index in bloom_filter_indices(element, m_bins, h_hashes) {
+                bloom_filter[index] = true;
             }
         }
+
+        self.bloom_filter = Some(bloom_filter);
     }
 
     fn build_ciphertexts(&mut self) {
         self.alphas = Some(vec![]);
         self.betas = Some(vec![]);
-        for bin in &self.bloom_filter.as_ref().unwrap().bins {
+        for bin in self.bloom_filter.as_ref().unwrap() {
             if *bin {
                 self.alphas.as_mut().unwrap().push(RistrettoPoint::random(&mut self.rng));
                 self.betas.as_mut().unwrap().push(RistrettoPoint::random(&mut self.rng));
@@ -219,7 +131,7 @@ impl<'a> Party<'a> {
     fn shuffle_decrypt(&mut self, alphas: &Vec<Vec<RistrettoPoint>>, betas: &Vec<RistrettoPoint>, public_keys: &Vec<RistrettoPoint>)
         -> (Vec<Vec<RistrettoPoint>>, Vec<RistrettoPoint>) {
         let permutation_key: u64 = self.rng.next_u64();
-        let permutor = Permutor::new_with_u64_key(self.bloom_filter.as_ref().unwrap().bin_count as u64, permutation_key);
+        let permutor = Permutor::new_with_u64_key(self.bloom_filter.as_ref().unwrap().len() as u64, permutation_key);
 
         let mut shuffled_alphas: Vec<Vec<RistrettoPoint>> = vec![];
         let mut shuffled_betas: Vec<RistrettoPoint> = vec![];
@@ -248,75 +160,17 @@ impl<'a> Party<'a> {
 #[structopt(name = "mpsu-ca")]
 struct Opt {
     #[structopt(short="n", long)]
-    party_count: u64,
+    party_count: usize,
     #[structopt(short="k", long)]
-    set_size: u64,
+    set_size: usize,
     #[structopt(short="d", long)]
-    domain_size: u64,
+    domain_size: usize,
     #[structopt(short="m", long)]
-    max_bins: u64,
+    max_bins: usize,
     #[structopt(short="c", long)]
-    cardinality: u64,
+    cardinality: usize,
     #[structopt(short="M", long, default_value="0")]
-    selective_insertion_mask: u32,
-}
-
-fn prob_0(n_elements: &u64, m_bins: &u64, h_hashes: &u64) -> f64 {
-    return (1f64 - (1f64 / *m_bins as f64)).powf((h_hashes * n_elements) as f64);
-}
-
-fn partial_binomial(n_elements: &u64, m_bins: &u64, h_hashes: &u64, x_ones: &u64) -> f64 {
-    let prob_of_0 = prob_0(n_elements, m_bins, h_hashes);
-    return (1f64 - prob_of_0).powf(*x_ones as f64);// * prob_of_0.powf((m_bins - x_ones) as f64);
-}
-
-fn compute_filter_params(m_bins: &u64, min_size: u64, max_size: u64) -> (u64, f64) {
-    let mut h_hashes = 1u64;
-    let mut variance = f64::MAX;
-
-    loop {
-        let mut probabilities: Vec<f64> = vec![];
-
-        for n in min_size..=max_size {
-            let probability: f64 = partial_binomial(&n, m_bins, &h_hashes, m_bins) /
-                (min_size..=max_size).map(|i| partial_binomial(&i, m_bins, &h_hashes, m_bins)).sum::<f64>();
-            probabilities.push(probability);
-        }
-
-        let mean: f64 = probabilities.iter().enumerate().map(|(x, p)| x as f64 * p).sum();
-        let new_variance = probabilities.iter().enumerate().map(|(x, p)| p * (x as f64 - mean) * (x as f64 - mean)).sum();
-
-        println!("{}", new_variance);
-        if new_variance > variance {
-            return (h_hashes - 1, variance.sqrt());
-        }
-
-        variance = new_variance;
-        h_hashes += 1;
-    }
-}
-
-fn generate_sets(mut rng: OsRng, set_count: u64, set_size: u64, domain_size: u64, union_cardinality: u64) -> Vec<HashSet<u64>> {
-    // TODO: Make sure union is has union_cardinality length
-    let union: Vec<u64> = (0..union_cardinality).map(|_| rng.gen_range(0, &domain_size)).collect();
-    let mut sets: Vec<HashSet<u64>> = vec![HashSet::from_iter(vec![]); set_count as usize];
-    //for i in 0..(set_count * set_size) {
-    //    sets[(i % set_size) as usize].insert()
-    //}
-    for (index, element) in union.iter().enumerate() {
-        sets[index % set_count as usize].insert(element.clone());
-    };
-    for i in 0..set_count {
-        while sets[i as usize].len() < set_size as usize {
-            sets[i as usize].insert(union[rng.gen_range(0, union_cardinality) as usize]);
-        }
-    }
-
-    return sets;
-
-    //let intersection_size = (set_count * set_size - union_cardinality) / set_count;
-    //let intersection: HashSet<u64> = (0..opt.set_size).map(|_| rng.gen_range(0, &opt.domain_size)).collect();
-    //let remaining_elements: HashSet<u64> =
+    selective_insertion_mask: u64,
 }
 
 fn main() {
@@ -324,13 +178,14 @@ fn main() {
     println!("{:#?}", opt);
 
     println!("Hello, world!");
-    let mut rng = OsRng;
+    let rng = OsRng;
 
     //let sets: Vec<HashSet<u64>> = (0..opt.party_count).map(|_| HashSet::from_iter((0..opt.set_size).map(|_| rng.gen_range(0, &opt.domain_size)))).collect();
-    let sets = generate_sets(rng, opt.party_count, opt.set_size, opt.domain_size, opt.cardinality);
+    //let sets = generate_sets(rng, opt.party_count, opt.set_size, opt.domain_size, opt.cardinality);
+    let sets = gen_sets_with_union(opt.party_count, opt.set_size, opt.domain_size, opt.cardinality);
 
     let now = Instant::now();
-    let mut parties: Vec<Party> = sets.iter().map(|set| Party::create(rng, set, opt.max_bins)).collect();
+    let mut parties: Vec<Party> = sets.iter().map(|set| Party::create(rng, set)).collect();
 
     println!("Setup complete");
 
@@ -354,9 +209,9 @@ fn main() {
     // Let parties build their Bloom filters
     for party in parties.iter_mut() {
         if opt.selective_insertion_mask == 0 {
-            party.build_bloom_filter(&opt.max_bins, &hash_count_h);
+            party.build_bloom_filter(opt.max_bins, hash_count_h);
         } else {
-            party.build_selective_bloom_filter(&opt.max_bins, &hash_count_h, &opt.selective_insertion_mask)
+            party.build_selective_bloom_filter(opt.max_bins, hash_count_h, opt.selective_insertion_mask)
         }
     }
 
@@ -411,9 +266,8 @@ fn main() {
         println!("Estimated set union cardinality (DROPOUT): {}", -(opt.max_bins as f64) * (1 << opt.selective_insertion_mask.count_ones()) as f64 * (1f64 - total as f64 / opt.max_bins as f64).ln() / hash_count_h as f64);
     }
 
-    let mut union: HashSet<u64> = HashSet::from_iter(vec![]);
-    for set in sets {
-        union = union.union(&set).cloned().collect();
-    }
+    let union = Set::union(&sets);
     println!("Actual set union cardinality: {}", union.len())
 }
+
+// cargo run --release -- --cardinality 3000 --domain-size 100000 --max-bins 10000 --party-count 5 --set-size 1000
